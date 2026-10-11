@@ -34,3 +34,7 @@ In a local Wi-Fi test, terminating exactly the helper-owned SSH tunnel resulted 
 A second local fault test paused the invocation-verified receiver process with `SIGSTOP`, leaving its last status falsely connected. The monitor detected the stale heartbeat and recovered a fresh stream in approximately 24 seconds, again retaining the virtual display ID. This tests an application-process stall; it does not simulate or cure a frozen kernel. Manual Disconnect was also left idle beyond the maximum retry delay and did not reconnect.
 
 With local LaunchAgent crash supervision enabled, killing the exact installed menu process recovered a new menu and video session in approximately 9 seconds. The virtual display is recreated in this case, as documented above. Normal Quit completed without restarting, and the saved connection intent was false.
+
+## Unresolved receiver availability issue
+
+A later unattended idle check did **not** pass: the receiver became unreachable through all available management paths, and its direct Wi-Fi access point disappeared. A bounded network wake attempt did not restore access. The cause has not been established; local inspection is required. The application remains configured to retry when the receiver becomes reachable again. The process-fault tests above must not be interpreted as proof of overnight availability or a fix for this machine-level outage.

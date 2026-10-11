@@ -77,3 +77,5 @@ Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). The private virtual-dis
 ## Display controls and recovery
 
 The menu-bar popover shows your actual screen arrangement and a single connection control. Enabled connections retry after transport or renderer failure; idle desktops have no session expiry. See [the display panel](docs/display-panel.md) and [recovery behavior and limits](docs/connection-resilience.md).
+
+**Availability remains experimental:** a subsequent unattended check lost access to the receiver over all management paths. Automatic process recovery is tested; the separate receiver outage is still unresolved. Details are recorded in [connection resilience](docs/connection-resilience.md#unresolved-receiver-availability-issue).
