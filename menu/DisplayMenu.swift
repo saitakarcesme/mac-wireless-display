@@ -451,7 +451,9 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        policy.cancel(); saveIntent()
+        // An OS logout/shutdown must not overwrite the saved connection intent.
+        // Explicit Disconnect and the panel's Quit already saved false.
+        policy.cancel()
         if let wakeActivity { ProcessInfo.processInfo.endActivity(wakeActivity); self.wakeActivity = nil }
         if state == .idle && (launchGate.isBusy || !retiredHosts.isEmpty) {
             setStatus("Waiting for the display host to finish opening…")
@@ -459,7 +461,7 @@ final class App: NSObject, NSApplicationDelegate {
         }
         guard state != .idle else { return .terminateNow }
         pendingQuit = true
-        disconnect()
+        stopConnection()
         return .terminateLater
     }
 }

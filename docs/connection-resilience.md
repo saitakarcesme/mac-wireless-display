@@ -1,6 +1,6 @@
 # Connection recovery
 
-The menu keeps an explicit connection intent. Once connected, it retries failures without an overall time limit, using a 2–30 second backoff. **Disconnect** and **Quit** cancel retries. Closing the panel does not disconnect. Intent is saved locally so a relaunched menu can resume a previously requested connection.
+The menu keeps an explicit connection intent. Once connected, it retries failures without an overall time limit, using a 2–30 second backoff. **Disconnect** and **Quit** cancel retries. Closing the panel does not disconnect. Intent is saved locally so a relaunched menu can resume a previously requested connection. OS termination preserves that saved intent; explicit Disconnect and the panel’s Quit clear it.
 
 During recovery, the menu retains its virtual display object and preserves its arrangement. The video host and SSH tunnel are replaced only after their owned predecessors stop. A menu-process crash itself destroys its virtual display; retention applies to transport/host recovery while the menu is alive.
 
