@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="480" viewBox="0 0 1280 480" role="img" aria-labelledby="title desc">
+  <title id="title">Mac Wireless Display</title>
+  <desc id="desc">A MacBook extends its desktop to a spare Linux computer over Wi-Fi.</desc>
+  <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101a33"/><stop offset="1" stop-color="#071019"/></linearGradient><linearGradient id="screen"><stop stop-color="#1c425b"/><stop offset="1" stop-color="#235258"/></linearGradient></defs>
+  <rect width="1280" height="480" rx="24" fill="url(#bg)"/>
+  <circle cx="1120" cy="50" r="220" fill="#48deb3" opacity=".045"/>
+  <g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif">
+    <text x="72" y="112" font-size="17" fill="#6ae8c5" letter-spacing="4">MORE DESKTOP. EXISTING HARDWARE.</text>
+    <text x="72" y="190" font-size="55" font-weight="700" fill="#f3f7ff">Mac Wireless Display</text>
+    <text x="75" y="235" font-size="24" fill="#a8b8cd">Give a spare Linux computer a second life.</text>
+    <text x="75" y="275" font-size="24" fill="#a8b8cd">A real extended desktop, over Wi-Fi.</text>
+    <rect x="74" y="332" width="159" height="36" rx="18" fill="#24354d"/><text x="96" y="356" font-size="15" fill="#e4edff">Open source</text>
+    <rect x="244" y="332" width="180" height="36" rx="18" fill="#24354d"/><text x="266" y="356" font-size="15" fill="#e4edff">Experimental</text>
+  </g>
+  <g stroke="#6ae8c5" fill="none" stroke-width="4">
+    <rect x="817" y="108" width="335" height="199" rx="12" fill="url(#screen)"/>
+    <path d="M978 309v34m-58 0h116"/>
+    <rect x="691" y="296" width="243" height="133" rx="9" fill="#102538"/>
+    <path d="M669 430h289l-14 13H683z" fill="#192f42"/>
+    <path d="M755 204q33-39 68 0m-56 14q21-25 45 0m-32 15q10-11 19 0" stroke-dasharray="2 7" stroke-linecap="round"/>
+  </g>
+  <g fill="#8ce2d3" opacity=".5"><rect x="840" y="135" width="132" height="12" rx="3"/><rect x="840" y="160" width="281" height="5" rx="2"/><rect x="840" y="179" width="246" height="5" rx="2"/><rect x="840" y="198" width="259" height="5" rx="2"/><rect x="840" y="223" width="83" height="58" rx="6"/><rect x="938" y="223" width="183" height="58" rx="6"/></g>
+</svg>

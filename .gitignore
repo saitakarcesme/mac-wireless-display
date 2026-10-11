@@ -1,0 +1,15 @@
+build/
+dist/
+*.app/
+__pycache__/
+*.py[cod]
+.DS_Store
+.env*
+*.pem
+*.key
+id_*
+known_hosts*
+*.log
+*.jsonl
+local-config.json
+.venv/

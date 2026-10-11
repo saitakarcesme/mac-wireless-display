@@ -1,0 +1,14 @@
+Mac Wireless Display
+Copyright 2026 Mac Wireless Display contributors
+
+This project contains CGVirtualDisplayPrivate.h, originally published by
+Khaos Tian in CGVirtualDisplay (2021), under the Apache License, Version 2.0:
+https://github.com/KhaosT/CGVirtualDisplay
+
+The header was obtained through the DeskPad source distribution. DeskPad is
+Copyright (c) 2022 Bastian Andelefski and is distributed under the MIT License.
+Its license is reproduced in third_party/DeskPad-MIT-LICENSE.txt.
+The original header attribution is retained.
+
+Apple, MacBook, macOS, ThinkPad, Linux and other product names belong to their
+respective owners. This project is independent and is not endorsed by them.

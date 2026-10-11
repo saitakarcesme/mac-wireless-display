@@ -1,0 +1,11 @@
+{
+  "bitrate": 18000000,
+  "fps": 60,
+  "captureFPS": 60,
+  "copyFrames": false,
+  "refineStatic": true,
+  "refineTiles": false,
+  "capEncoderFPS": false,
+  "strictPacerTimer": false,
+  "keyframeInterval": 30
+}

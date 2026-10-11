@@ -1,0 +1,14 @@
+[Unit]
+Description=Mac Wireless Display receiver
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart="%h/.local/lib/mac-h264-display/run-receiver" --port 16010 --refinement-port 16011 --renderer gpu
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=3
+
+[Install]
+WantedBy=graphical-session.target
