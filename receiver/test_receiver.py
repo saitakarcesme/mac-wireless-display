@@ -5,6 +5,7 @@ import os
 import socket
 import threading
 from types import SimpleNamespace
+from unittest.mock import patch
 import unittest
 from receiver import Frame, FrameQueue, FrameWrite, HEADER, Receiver
 
@@ -107,8 +108,82 @@ class FakeReceiver(Receiver):
         self.player = None
 
 
+class WriteDeadlinePolicyTests(unittest.TestCase):
+    """Policy deadlines use a controlled clock, independently of OS scheduling."""
+    def setUp(self):
+        self.receiver = FakeReceiver()
+        self.receiver.args = SimpleNamespace(max_queue_ms=20)
+        self.receiver.player = SimpleNamespace(stdin=SimpleNamespace(fileno=lambda: 123), poll=lambda: None)
+        self.now = 0.0
+        self.clock = patch("receiver.time.monotonic", side_effect=lambda: self.now)
+        self.clock.start()
+        self.addCleanup(self.clock.stop)
+        self.frame = Frame(1, 100, True, b"complete-access-unit", 0)
+
+    def test_expired_admission_never_writes_or_polls(self):
+        self.now = .020
+        with patch("receiver.os.write") as write, patch("receiver.select.select") as poll:
+            result = self.receiver.write_frame(self.frame, 0)
+        write.assert_not_called()
+        poll.assert_not_called()
+        self.assertEqual(result.reason, "pipe-write-deadline")
+        self.assertEqual(result.age_at_end_ms, 20)
+        self.assertEqual(result.bytes_written, 0)
+        self.assertFalse(result.decoder_broken)
+
+    def test_partial_progress_does_not_renew_arrival_deadline(self):
+        calls = 0
+        def partial_then_block(fd, data):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                self.now = .018
+                return 2
+            raise BlockingIOError()
+
+        def wait(read, writable, exceptional, timeout):
+            self.assertAlmostEqual(timeout, .002)
+            self.now = .020
+            return [], [], []
+
+        with patch("receiver.os.write", side_effect=partial_then_block), \
+             patch("receiver.select.select", side_effect=wait):
+            result = self.receiver.write_frame(self.frame, 0)
+        self.assertEqual(calls, 2)
+        self.assertEqual(result.bytes_written, 2)
+        self.assertEqual(result.age_at_end_ms, 20)
+        self.assertTrue(result.decoder_broken)
+
+    def test_writable_after_late_wakeup_does_not_admit_another_write(self):
+        def delayed_ready(read, writable, exceptional, timeout):
+            self.assertAlmostEqual(timeout, .020)
+            self.now = .134
+            return [], writable, []
+
+        with patch("receiver.os.write", side_effect=BlockingIOError()) as write, \
+             patch("receiver.select.select", side_effect=delayed_ready):
+            result = self.receiver.write_frame(self.frame, 0)
+        self.assertEqual(write.call_count, 1)
+        self.assertEqual(result.reason, "pipe-write-deadline")
+        self.assertEqual(result.age_at_end_ms, 134)
+        self.assertEqual(result.bytes_written, 0)
+        self.assertFalse(result.decoder_broken)
+
+    def test_startup_grace_is_a_fixed_deadline(self):
+        def delayed_timeout(read, writable, exceptional, timeout):
+            self.assertAlmostEqual(timeout, .050)
+            self.now = .050
+            return [], [], []
+
+        with patch("receiver.os.write", side_effect=BlockingIOError()), \
+             patch("receiver.select.select", side_effect=delayed_timeout):
+            result = self.receiver.write_frame(self.frame, .050)
+        self.assertEqual(result.reason, "pipe-write-deadline")
+        self.assertEqual(result.age_at_end_ms, 50)
+
+
 class RecoveryTests(unittest.TestCase):
-    def test_real_nonblocking_pipe_records_partial_bytes_and_bounded_age(self):
+    def test_real_nonblocking_pipe_reports_exact_written_prefix(self):
         receiver = FakeReceiver()
         receiver.args = SimpleNamespace(max_queue_ms=15)
         read_fd, write_fd = os.pipe()
@@ -116,14 +191,31 @@ class RecoveryTests(unittest.TestCase):
         output = os.fdopen(write_fd, "wb", buffering=0)
         receiver.player = SimpleNamespace(stdin=output, poll=lambda: None)
         try:
-            f = Frame(10, 100, True, b"a" * (4 * 1024 * 1024), time.monotonic())
-            result = receiver.write_frame(f, 0)
+            # Actual pipe capacity/partial-write semantics are exercised, while
+            # the policy clock expires immediately after that first write. A
+            # descheduled CI worker must not turn this into a zero-byte test.
+            f = Frame(10, 100, True, bytes(range(256)) * 16384, 0)
+            clock = SimpleNamespace(now=0.0)
+            real_write = os.write
+
+            def write_then_expire(fd, data):
+                written = real_write(fd, data)
+                clock.now = .015
+                return written
+
+            with patch("receiver.time.monotonic", side_effect=lambda: clock.now), \
+                 patch("receiver.os.write", side_effect=write_then_expire):
+                result = receiver.write_frame(f, 0)
             self.assertEqual(result.reason, "pipe-write-deadline")
             self.assertGreater(result.bytes_written, 0)
             self.assertLess(result.bytes_written, result.bytes_total)
             self.assertTrue(result.decoder_broken)
-            self.assertGreaterEqual(result.age_at_end_ms, 15)
-            self.assertLess(result.age_at_end_ms, 100)
+            output.close()
+            actual = bytearray()
+            while chunk := os.read(read_fd, 65536):
+                actual.extend(chunk)
+            self.assertEqual(len(actual), result.bytes_written)
+            self.assertEqual(actual, f.data[:result.bytes_written])
         finally:
             output.close()
             os.close(read_fd)
@@ -136,16 +228,24 @@ class RecoveryTests(unittest.TestCase):
         output = os.fdopen(write_fd, "wb", buffering=0)
         receiver.player = SimpleNamespace(stdin=output, poll=lambda: None)
         try:
+            filled = 0
             while True:
                 try:
-                    os.write(write_fd, b"a" * 65536)
+                    filled += os.write(write_fd, b"a" * 65536)
                 except BlockingIOError:
                     break
             result = receiver.write_frame(frame(10, key=True), 0)
             self.assertEqual(result.reason, "pipe-write-deadline")
             self.assertEqual(result.bytes_written, 0)
             self.assertFalse(result.decoder_broken)
-            self.assertLess(result.age_at_end_ms, 100)
+            # This is a real kernel timeout. Its return can be arbitrarily late
+            # if CI deschedules us; deadline policy is checked with a fake clock
+            # below. Confirm the failed AU did not modify the full pipe.
+            output.close()
+            actual = bytearray()
+            while chunk := os.read(read_fd, 65536):
+                actual.extend(chunk)
+            self.assertEqual(actual, b"a" * filled)
         finally:
             output.close()
             os.close(read_fd)
