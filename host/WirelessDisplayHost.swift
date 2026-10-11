@@ -483,7 +483,8 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
         // drops every other frame with that setting (Chromium bug 450596068).
         try set(kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanTrue)
         try set(kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: options.bitrate), required: true)
-        // A 100ms envelope caps bursts while allowing 50% headroom over the mean target.
+        // Request an optional 100ms rate window with 50% headroom. Setter success
+        // does not establish an enforced burst cap; the tested RTVC backend ignored tighter requests.
         let limitBytes = Double(options.bitrate) / 8.0 * 0.1 * 1.5
         try set(kVTCompressionPropertyKey_DataRateLimits, [NSNumber(value: limitBytes), NSNumber(value: 0.1)] as CFArray)
         try set(kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2)

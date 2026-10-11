@@ -50,7 +50,7 @@ Read the [architecture](docs/ARCHITECTURE.md), [measurement notes](docs/PERFORMA
 
 The latest recovery-aware comparison reduced median capture-callback-to-presentation time from about **34–39 ms to 28 ms** on the tested setup. The receiver-local median was about **15 ms**. These are software timestamps, not physical mouse-to-pixel latency. Occasional **600–800 ms** stress-test gaps remain; average FPS alone would hide them. A higher-precision sender timer improved sending from about 57 to 60 FPS without improving actual presentation, so it stays disabled.
 
-During matched motion tests, the host, encoder, and menu together used roughly **21% of one CPU core** in the recovery comparison (23–25% in the earlier timer trials). WindowServer was measured separately and cannot be attributed entirely to this application. Power consumption in watts was not measured. The [performance report](docs/PERFORMANCE.md) explains the test conditions and uncertainty.
+During matched motion tests, the host, encoder, and menu together used roughly **21% of one CPU core** in the recovery comparison (23–25% in the earlier timer trials). That subtotal excludes the Python connection helper and SSH tunnel. WindowServer was measured separately and cannot be attributed entirely to this application. Power consumption in watts was not measured. The [performance report](docs/PERFORMANCE.md) explains the test conditions and uncertainty.
 
 ## Development
 

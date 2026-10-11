@@ -34,4 +34,4 @@ The menu's helper tracks its own host executable/PID/start time, SSH subprocess 
 
 Both video and refinement bind only to `127.0.0.1`. SSH provides encryption and peer authentication, with strict host-key checking and no automatic unknown-key acceptance. The payload protocols do not replace SSH authentication. Local processes under the same user are part of the trust boundary; this is not designed as a public multi-tenant streaming server.
 
-The app neither records files of the screen nor sends frames to a project server. Runtime files and local logs are not part of the public repository.
+The app does not create a screen-recording archive or send frames to a project server. The Linux receiver temporarily writes original BGRA pixels to mode `0600` files inside a mode `0700` temporary directory so mpv can load an RGB overlay. Normal processing unlinks each file after mpv acknowledges the load or the operation fails. Abrupt process termination can leave temporary pixel files behind; these are sensitive local screen content. Runtime files and local logs are not part of the public repository.

@@ -37,7 +37,7 @@ A later same-binary A/B/A comparison kept the hardware encoder, 18 Mbit/s target
 
 The longer interval reduced typical software latency and the frequency of long gaps in this comparison, without improving delivered FPS. It also had the worst individual gap, during early recovery. A single A/B/A on variable Wi-Fi does **not** prove universal latency or reliability improvement. The stream's target bitrate is not a fixed wire rate: content and encoder rate control affect actual output.
 
-CPU uses matched 31-sample motion windows and is a percentage of one core. The approximately 1% relative difference is too small to claim an efficiency gain. Shared WindowServer CPU was 50.741%, 51.338% and 46.927% of one core, separately. Estimated clock-alignment uncertainty was ±1.573, ±2.031 and ±2.112 ms, assuming a symmetric path.
+CPU uses matched 31-sample motion windows and is a percentage of one core. This subtotal excludes the Python connection helper and SSH tunnel, so it is not whole-application CPU. The approximately 1% relative difference is too small to claim an efficiency gain. Shared WindowServer CPU was 50.741%, 51.338% and 46.927% of one core, separately. Estimated clock-alignment uncertainty was ±1.573, ±2.031 and ±2.112 ms, assuming a symmetric path.
 
 The tested local profile retains the 120-frame interval with negotiated recovery. The public host defaults to a conservative 30-frame interval and recovery disabled; opt-in instructions are in [recovery control](recovery-control.md). If the peer does not negotiate, the host keeps the short interval.
 
@@ -90,7 +90,29 @@ The precise timer improved sender cadence by 4.38%, but actual presentation did 
 
 Clock alignment uses repeated monotonic midpoint probes. Estimated clock uncertainty for the timer cohorts was ±1.71, ±2.14 and ±1.83 ms, under a symmetric-path assumption. Capture modes can change when the callback arrives relative to the scheduled display time, so results from different timestamp boundaries must not be compared as physical latency improvements.
 
+## Repeated motion and settled-image transitions
+
+A five-minute correctness run alternated two seconds of motion and two seconds of still content, using the same recovery-aware local profile. All 150 phase markers were present. All 75 static phases received an accepted original RGB snapshot, and all 74 complete static-to-next-motion transitions removed the preceding overlay before a newer video access unit was written. The initial motion phase cleared a pre-run snapshot; four other snapshots were already cleared by a valid video header before their motion phase began. These cases are counted explicitly rather than presented as negative transition latency.
+
+The end snapshot reported 8,600 received and written access units, no dropped units, one initial decoder and no recovery requests. RGB software acceptance occurred a median 655 ms after the static phase marker (95th percentile 696 ms, maximum 875 ms), with estimated clock-join uncertainty of ±3.645 ms under a symmetric-path assumption. The audit observes renderer acknowledgements and pipe-write ordering; it does not establish when physical panel pixels changed.
+
+Across the matched 290-second mixed motion/static resource window, host + encoder + menu CPU averaged 10.752% of one core. Shared WindowServer averaged 41.873% of one core, separately. The Python connection helper and SSH tunnel are excluded from this subtotal. Diagnostic overhead is included. This mixed workload must not be compared directly with continuous-scroll CPU or FPS; still content intentionally stops producing video frames. Temporary instrumentation was removed and the ordinary connection was verified afterward.
+
+## Ten-minute mostly settled connection
+
+A subsequent 600-second ordinary-connection check used 21 process snapshots and six receiver-status samples. All samples stayed connected with a safe accepted RGB image matching the latest video sequence. Received and written frames both advanced by 182, with no drops or extra decoder starts; this was mostly settled content, not a completely frame-free idle.
+
+Host + encoder + menu averaged 0.792% of one CPU core. This subtotal excludes the Python connection helper and SSH tunnel. Shared WindowServer averaged 30.740% separately. The three sampled processes retained stable PIDs; their resident-memory endpoint changes were −3.000, +0.609 and −0.031 MiB respectively. This short observation found no sustained growth in those endpoints, but it is not a proof against all memory leaks or a measurement of total graphics memory, watts or battery life.
+
 ## Remaining issues
+
+### Optional encoder rate-window requests
+
+A generated-only test encoded the same 360-frame native 1080p sequence in four fresh hardware RTVC sessions at an 18 Mbit/s target and a 120-frame keyframe interval. Requested `DataRateLimits` were 337,500 bytes per 100 ms, 225,000 bytes per 100 ms, 168,750 bytes per 50 ms, then the first request again. Every setter succeeded, but property readback returned `kVTPropertyNotSupportedErr` before and after encoding. All four encoded streams were byte-for-byte identical, with IDRs still reaching 266,153 bytes and a six-frame decode-time window reaching 379,772 bytes.
+
+These measurements reject tighter requests as a useful burst-reduction control on this tested backend. The host's optional request is not an enforced cap, and setter success alone is not evidence of one. This experiment used generated frames; it measured neither network delivery nor physical display latency.
+
+### Delivery pauses
 
 Occasional large keyframes and upstream delivery pauses still produce visible tail latency. One 292 KB IDR began its decoder write with roughly 61 ms of its receiver budget remaining and still timed out after a partial write. A small five-millisecond completion allowance cannot fix that event. Negotiated recovery now permits a longer interval in the tested local profile, but it does not shrink each large IDR or eliminate network pauses. The public default remains conservative.
 
