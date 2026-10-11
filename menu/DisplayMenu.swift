@@ -10,12 +10,11 @@ final class App: NSObject, NSApplicationDelegate {
     private let hostIdentifier = "local.mac-wireless-display.host"
     private var item: NSStatusItem!
     private let info = NSMenuItem(title: "Disconnected", action: nil, keyEquivalent: "")
-    private var connectItem: NSMenuItem!
-    private var disconnectItem: NSMenuItem!
-    private var controlsWindow: NSWindow?
-    private var controlsStatus: NSTextField?
-    private var controlsConnect: NSButton?
-    private var controlsDisconnect: NSButton?
+    private let popover = NSPopover()
+    private let panel = DisplayPanel()
+    private var policy = ConnectionPolicy()
+    private var wakeActivity: NSObjectProtocol?
+    private var lastVideoHealthy = ProcessInfo.processInfo.systemUptime
     private var display: CGVirtualDisplay?
     private var helper: Process?
     private var helperInput: Pipe?
@@ -25,6 +24,7 @@ final class App: NSObject, NSApplicationDelegate {
     private var generation = 0
     private var errorMessage: String?
     private var pendingQuit = false
+    private var quitWhenStopped = false
     private let launchGate = HostLaunchGate()
     private var deferredHostLaunch: DispatchWorkItem?
     private var retiredHosts: [(application: NSRunningApplication, deadline: Date)] = []
@@ -48,37 +48,71 @@ final class App: NSObject, NSApplicationDelegate {
         item.button?.setAccessibilityIdentifier("wireless-display-status")
         item.button?.setAccessibilityLabel("Wireless display")
         item.button?.setAccessibilityHelp("Open the wireless display connection menu.")
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-        menu.addItem(info)
-        menu.addItem(.separator())
-        connectItem = add("Connect", #selector(connect), to: menu)
-        disconnectItem = add("Disconnect", #selector(disconnect), to: menu)
-        _ = add("Connection status…", #selector(showControls), to: menu)
-        _ = add("Arrange displays", #selector(arrange), to: menu)
-        _ = add("Quit", #selector(quit), to: menu)
-        item.menu = menu
+        item.button?.target = self
+        item.button?.action = #selector(showControls)
+        item.button?.setAccessibilityHelp("Show displays and connection controls.")
+        popover.behavior = .transient
+        popover.contentViewController = panel
+        panel.onToggle = { [weak self] in
+            guard let self else { return }
+            if self.policy.requested { self.disconnect() } else { self.connect() }
+        }
+        panel.onSettings = {
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension")!)
+        }
+        panel.onQuit = { [weak self] in self?.quit() }
+        NotificationCenter.default.addObserver(self, selector: #selector(screensChanged),
+            name: NSApplication.didChangeScreenParametersNotification, object: nil)
         updateButtons()
         healthTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.checkHealth() }
-        if CommandLine.arguments.contains("--connect") { connect() }
+        let saved = (try? Data(contentsOf: base.appendingPathComponent("connection-intent.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Bool] }
+        if saved?["connect"] == true || (saved == nil && CommandLine.arguments.contains("--connect")) { connect() }
         if CommandLine.arguments.contains("--show-controls") { showControls() }
     }
 
-    private func add(_ title: String, _ action: Selector, to menu: NSMenu) -> NSMenuItem {
-        let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        entry.target = self
-        menu.addItem(entry)
-        return entry
-    }
+    @objc private func screensChanged() { updateButtons() }
 
     private func updateButtons() {
-        connectItem?.isEnabled = state == .idle && !launchGate.isBusy && retiredHosts.isEmpty
-        disconnectItem?.isEnabled = state == .starting || state == .streaming
-        controlsConnect?.isEnabled = connectItem?.isEnabled ?? false
-        controlsDisconnect?.isEnabled = disconnectItem?.isEnabled ?? false
-        controlsStatus?.stringValue = info.title
+        guard item != nil else { return }
         item.button?.toolTip = "Wireless display: \(info.title)"
         item.button?.setAccessibilityValue(info.title)
+        // Do not redraw a closed popover on every telemetry sample.
+        guard popover.isShown else { return }
+        updatePanel()
+    }
+
+    private func updatePanel() {
+        var screens: [PanelScreen] = []
+        for screen in NSScreen.screens {
+            let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+            let id: CGDirectDisplayID = number?.uint32Value ?? 0
+            let wireless: Bool = display.map { $0.displayID == id } ?? false
+            let pixels = String(CGDisplayPixelsWide(id)) + " × " + String(CGDisplayPixelsHigh(id))
+            screens.append(PanelScreen(id: id, name: screen.localizedName, bounds: CGDisplayBounds(id),
+                pixels: pixels, builtin: CGDisplayIsBuiltin(id) != 0, wireless: wireless))
+        }
+        screens.sort {
+            if $0.bounds.minY == $1.bounds.minY { return $0.bounds.minX < $1.bounds.minX }
+            return $0.bounds.minY < $1.bounds.minY
+        }
+        let retrying = policy.requested && (state == .idle || state == .stopping)
+        let title = retrying ? "Reconnecting automatically" : info.title
+        let detail: String
+        if retrying { detail = "\(errorMessage ?? "Connection interrupted"). Retrying while this display is enabled." }
+        else if state == .streaming { detail = "Auto-reconnect is on. Your display stays connected while this panel is closed." }
+        else if state == .starting { detail = "Opening a secure connection to your display receiver." }
+        else { detail = errorMessage ?? "Connect your wireless screen to extend this desktop." }
+        panel.refresh(screens: screens, title: title, explanation: detail,
+            wantsConnection: policy.requested, enabled: policy.requested || (state == .idle && !launchGate.isBusy && retiredHosts.isEmpty))
+        popover.contentSize = panel.preferredContentSize
+    }
+
+    private func saveIntent() {
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: ["connect": policy.requested]) {
+            try? data.write(to: base.appendingPathComponent("connection-intent.json"), options: .atomic)
+        }
     }
 
     private func setStatus(_ title: String) {
@@ -87,76 +121,47 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     @objc func showControls() {
-        if controlsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 210),
-                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            window.title = "Wireless Display"
-            window.isReleasedWhenClosed = false
-            guard let content = window.contentView else { return }
-            let title = NSTextField(labelWithString: "Wireless second display")
-            title.font = .systemFont(ofSize: 17, weight: .semibold)
-            title.frame = NSRect(x: 24, y: 162, width: 392, height: 24)
-            content.addSubview(title)
-            let status = NSTextField(wrappingLabelWithString: info.title)
-            status.frame = NSRect(x: 24, y: 98, width: 392, height: 52)
-            status.setAccessibilityIdentifier("connection-status")
-            content.addSubview(status)
-            let connect = NSButton(title: "Connect", target: self, action: #selector(connect))
-            connect.bezelStyle = .rounded
-            connect.frame = NSRect(x: 220, y: 49, width: 90, height: 32)
-            connect.setAccessibilityIdentifier("connect-display")
-            content.addSubview(connect)
-            let disconnect = NSButton(title: "Disconnect", target: self, action: #selector(disconnect))
-            disconnect.bezelStyle = .rounded
-            disconnect.frame = NSRect(x: 318, y: 49, width: 98, height: 32)
-            disconnect.setAccessibilityIdentifier("disconnect-display")
-            content.addSubview(disconnect)
-            let note = NSTextField(labelWithString: "Closing this window keeps the connection active.")
-            note.font = .systemFont(ofSize: 11)
-            note.textColor = .secondaryLabelColor
-            note.frame = NSRect(x: 24, y: 18, width: 392, height: 18)
-            content.addSubview(note)
-            controlsWindow = window
-            controlsStatus = status
-            controlsConnect = connect
-            controlsDisconnect = disconnect
-        }
-        updateButtons()
-        guard let window = controlsWindow else { return }
-        if !window.isVisible {
-            let builtin = NSScreen.screens.first {
-                guard let id = $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return false }
-                return CGDisplayIsBuiltin(id.uint32Value) != 0
-            }
-            if let screen = builtin ?? NSScreen.main {
-                let frame = screen.visibleFrame
-                window.setFrameOrigin(NSPoint(x: frame.midX - window.frame.width / 2,
-                                              y: frame.midY - window.frame.height / 2))
-            }
-        }
-        window.makeKeyAndOrderFront(nil)
+        if popover.isShown { popover.performClose(nil); return }
+        guard let button = item.button else { return }
+        updatePanel()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showControls()
+        if !popover.isShown { showControls() }
+        else { NSApp.activate(ignoringOtherApps: true) }
         return true
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     @objc func connect() {
+        policy.request(); saveIntent()
+        if wakeActivity == nil {
+            wakeActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
+                reason: "Keep the requested wireless display connection available")
+        }
+        startConnection()
+    }
+
+    private func startConnection() {
         guard state == .idle, !launchGate.isBusy, retiredHosts.isEmpty else { return }
         // Never take over the experimental host or an unrelated running bundle.
         guard NSRunningApplication.runningApplications(withBundleIdentifier: hostIdentifier).isEmpty else {
-            setStatus("Another display connection is active; close it first")
+            policy.failed(now: ProcessInfo.processInfo.systemUptime)
+            errorMessage = "Another display connection is active"
+            setStatus(errorMessage!)
             return
         }
         guard FileManager.default.isExecutableFile(atPath: base.appendingPathComponent("h264-control").path),
               FileManager.default.fileExists(atPath: hostURL.path) else {
-            setStatus("Wireless display components are not installed")
+            disconnect()
+            errorMessage = "Wireless display components are not installed"
+            setStatus(errorMessage!)
             return
         }
+        policy.request()
         generation += 1
         let token = generation
         errorMessage = nil
@@ -249,22 +254,22 @@ final class App: NSObject, NSApplicationDelegate {
             setStatus(event["message"] as? String ?? "Connecting…")
         case "ready":
             guard host == nil, launchGate.schedule(token) else { return }
-            guard createDisplay() else { fail(info.title); return }
+            let newDisplay = display == nil
+            guard !newDisplay || createDisplay() else { fail(info.title); return }
             // Let WindowServer expose the new ID before ScreenCaptureKit asks for it.
             let deferred = DispatchWorkItem { [weak self] in
                 guard let self, token == self.generation, self.state == .starting,
                       self.launchGate.begin(token) else { return }
                 self.deferredHostLaunch = nil
-                self.arrange()
+                if newDisplay { self.arrange() }
                 self.openHost(token: token)
             }
             deferredHostLaunch = deferred
             DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: deferred)
         case "status":
             guard let receiver = event["receiver"] as? [String: Any] else { return }
-            let formatter = ISO8601DateFormatter()
-            guard let stamp = receiver["updated_at"] as? String,
-                  let updated = formatter.date(from: stamp), abs(updated.timeIntervalSinceNow) < 10 else { return }
+            // The helper verifies changing heartbeat tokens with its monotonic clock.
+            // No cross-machine wall-clock comparison, and no idle frame deadline.
             lastReceiverUpdate = Date()
             let connected = receiver["connected"] as? Bool ?? false
             let frames = (receiver["written_frames"] as? NSNumber)?.intValue ?? 0
@@ -272,6 +277,8 @@ final class App: NSObject, NSApplicationDelegate {
             if connected && frames > 0 && mpv["video-params"] is [String: Any],
                mpv["vo-configured"] as? Bool == true, host != nil {
                 state = .streaming
+                lastVideoHealthy = ProcessInfo.processInfo.systemUptime
+                policy.healthy()
                 setStatus("Connected · 1080p")
             } else if state == .streaming {
                 setStatus("Waiting for the video connection…")
@@ -329,6 +336,10 @@ final class App: NSObject, NSApplicationDelegate {
             }
         }
         updateButtons()
+        completeRequestedQuit()
+        if state == .idle && policy.ready(now: ProcessInfo.processInfo.systemUptime) {
+            startConnection()
+        }
         guard state == .starting || state == .streaming else { return }
         if let host, host.isTerminated {
             fail("The display host closed; check Screen Recording permission")
@@ -336,15 +347,26 @@ final class App: NSObject, NSApplicationDelegate {
             fail("Video did not start in time; check Screen Recording permission")
         } else if state == .streaming && Date().timeIntervalSince(lastReceiverUpdate) > 12 {
             fail("The display receiver status is unavailable")
+        } else if state == .streaming && ProcessInfo.processInfo.systemUptime - lastVideoHealthy > 15 {
+            fail("The display renderer stopped responding")
         }
     }
 
     private func fail(_ message: String) {
         errorMessage = message
-        disconnect()
+        policy.failed(now: ProcessInfo.processInfo.systemUptime)
+        stopConnection()
     }
 
     @objc func disconnect() {
+        policy.cancel(); saveIntent()
+        if let wakeActivity { ProcessInfo.processInfo.endActivity(wakeActivity); self.wakeActivity = nil }
+        errorMessage = nil
+        if state == .idle { display = nil; setStatus("Disconnected"); return }
+        stopConnection()
+    }
+
+    private func stopConnection() {
         guard state != .idle, state != .stopping else { return }
         state = .stopping
         setStatus("Disconnecting…")
@@ -357,6 +379,7 @@ final class App: NSObject, NSApplicationDelegate {
         helperInput = nil
         stopDeadline = Date().addingTimeInterval(10)
         stopTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.finishStopWhenReady() }
+        if let stopTimer { RunLoop.main.add(stopTimer, forMode: .common) }
         finishStopWhenReady()
     }
 
@@ -380,7 +403,7 @@ final class App: NSObject, NSApplicationDelegate {
         helperOutput = nil
         helper = nil
         host = nil
-        display = nil
+        if !policy.requested { display = nil }
         state = .idle
         generation += 1
         waitingForLateLaunch = launchGate.isBusy
@@ -389,6 +412,7 @@ final class App: NSObject, NSApplicationDelegate {
         } else {
             setStatus(errorMessage ?? "Disconnected")
         }
+        completeRequestedQuit()
         if pendingQuit {
             pendingQuit = false
             // Stay available to retire a delayed OS launch instead of orphaning it.
@@ -412,9 +436,23 @@ final class App: NSObject, NSApplicationDelegate {
         else { CGCancelDisplayConfiguration(configuration) }
     }
 
-    @objc func quit() { NSApp.terminate(nil) }
+    @objc func quit() {
+        // Finish asynchronous connection teardown before asking AppKit to quit.
+        // A terminate-later run loop can otherwise defer ordinary stop timers.
+        quitWhenStopped = true
+        disconnect()
+        completeRequestedQuit()
+    }
+
+    private func completeRequestedQuit() {
+        guard quitWhenStopped, state == .idle, !launchGate.isBusy, retiredHosts.isEmpty else { return }
+        quitWhenStopped = false
+        NSApp.terminate(nil)
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        policy.cancel(); saveIntent()
+        if let wakeActivity { ProcessInfo.processInfo.endActivity(wakeActivity); self.wakeActivity = nil }
         if state == .idle && (launchGate.isBusy || !retiredHosts.isEmpty) {
             setStatus("Waiting for the display host to finish opening…")
             return .terminateCancel

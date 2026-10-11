@@ -89,10 +89,11 @@ class ControlTests(unittest.TestCase):
         session = control.Session()
         session.target = "display-receiver"
         session.receiver_owned = True
+        session.client_id = "test-client"
         session.tunnel = MagicMock()
         with patch.object(session, "command") as command:
             session.cleanup()
-        command.assert_called_once_with("systemctl --user stop mac-h264-display.service", timeout=5)
+        command.assert_called_once_with(session.ownership_command("release"), timeout=8)
         session.tunnel.terminate.assert_called_once()
         session.tunnel.wait.assert_called_once_with(timeout=2)
 
@@ -100,6 +101,7 @@ class ControlTests(unittest.TestCase):
         session = control.Session()
         session.target = "display-receiver"
         session.receiver_owned = True
+        session.client_id = "test-client"
         session.tunnel = MagicMock()
         with patch.object(session, "command", side_effect=subprocess.TimeoutExpired("ssh", 5)):
             session.cleanup()
@@ -121,6 +123,46 @@ class ControlTests(unittest.TestCase):
         self.assertIn("StrictHostKeyChecking=yes", arguments)
         self.assertEqual(arguments[-1], "display-receiver")
         self.assertNotIn("tailscale", " ".join(arguments))
+
+
+class HeartbeatTests(unittest.TestCase):
+    def test_idle_desktop_never_expires_while_telemetry_advances(self):
+        heartbeat = control.ReceiverHeartbeat()
+        for tick in range(0, 86400, 2):
+            heartbeat.observe({"updated_at": str(tick), "written_frames": 42}, tick)
+
+    def test_replayed_status_is_not_health(self):
+        heartbeat = control.ReceiverHeartbeat()
+        heartbeat.observe({"updated_at": "same"}, 10)
+        heartbeat.observe({"updated_at": "same"}, 22)
+        with self.assertRaises(control.SessionError):
+            heartbeat.observe({"updated_at": "same"}, 22.01)
+
+    def test_clock_adjustment_is_a_new_heartbeat_not_negative_age(self):
+        heartbeat = control.ReceiverHeartbeat()
+        heartbeat.observe({"updated_at": "tomorrow"}, 10)
+        heartbeat.observe({"updated_at": "yesterday"}, 12)
+        heartbeat.observe({"updated_at": "yesterday"}, 20)
+        with self.assertRaises(ValueError):
+            heartbeat.observe({}, 21)
+
+    def test_output_stall_requires_new_frames_not_idle_time(self):
+        heartbeat = control.ReceiverHeartbeat()
+        def status(tick, written, pts):
+            return {"updated_at": str(tick), "written_frames": written,
+                    "mpv": {"time-pos": pts}, "decoder_restarts": 1}
+        heartbeat.observe(status(0, 10, 1), 0)
+        heartbeat.observe(status(4000, 11, 1), 4000)  # Small final decoder tail is allowed.
+        heartbeat.observe(status(4001, 40, 2), 4001)
+        heartbeat.observe(status(4005, 50, 2), 4005)
+        with self.assertRaises(control.SessionError):
+            heartbeat.observe(status(4012, 50, 2), 4012)
+
+    def test_decoder_generation_change_resets_output_probe(self):
+        heartbeat = control.ReceiverHeartbeat()
+        heartbeat.observe({"updated_at": "a", "written_frames": 5, "mpv": {"time-pos": 0}}, 0)
+        heartbeat.observe({"updated_at": "b", "written_frames": 30,
+                           "mpv": {"time-pos": 0}, "decoder_restarts": 2}, 50)
 
 
 if __name__ == "__main__":

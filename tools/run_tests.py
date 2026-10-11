@@ -22,6 +22,7 @@ def main():
         run([sys.executable, "-m", "unittest", "discover", "-s", ROOT / directory, "-p", "test_*.py"], env=environment)
     if sys.platform == "darwin":
         suites = [
+            ("connection-policy", ["menu/ConnectionPolicy.swift", "menu/ConnectionPolicyTests.swift"], []),
             ("launch-gate", ["menu/HostLaunchGate.swift", "menu/LaunchGateTests.swift"], []),
             ("latest-frame", ["host/LatestFrameGate.swift", "host/LatestFrameGateTests.swift"], []),
             ("keyframes", ["host/KeyframeCadence.swift", "host/KeyframeCadenceTests.swift"], []),

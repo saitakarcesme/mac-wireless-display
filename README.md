@@ -73,3 +73,7 @@ The tests use generated media and fake protocol peers. They do not grant screen 
 ## License and acknowledgements
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). The private virtual-display declarations retain their original attribution to [Khaos Tian](https://github.com/KhaosT/CGVirtualDisplay), obtained through [DeskPad](https://github.com/Stengo/DeskPad). The receiver uses separately installed [mpv](https://mpv.io/) and your system's VAAPI drivers; they are not bundled here.
+
+## Display controls and recovery
+
+The menu-bar popover shows your actual screen arrangement and a single connection control. Enabled connections retry after transport or renderer failure; idle desktops have no session expiry. See [the display panel](docs/display-panel.md) and [recovery behavior and limits](docs/connection-resilience.md).
