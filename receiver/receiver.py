@@ -328,6 +328,7 @@ class Receiver:
         self.stats_lock = threading.Lock()
         self.active_connection = None
         self.session_thread = None
+        self.consumer_thread = None
         self.presentation = (PresentationTracker()
                              if getattr(args, "measure_presentation", False) else None)
         self.refinement = None
@@ -601,6 +602,7 @@ class Receiver:
         with self.stats_lock:
             dropped_base = self.stats["dropped_frames"]
         worker = threading.Thread(target=self.consume, args=(queue, dropped_base), daemon=True)
+        self.consumer_thread = worker
         worker.start()
         sequence = None
         minimum_offset = None
@@ -639,6 +641,13 @@ class Receiver:
         finally:
             queue.close(discard=True)
             worker.join(timeout=2)
+            if worker.is_alive():
+                # The consumer still owns the shared player. Leave its handle
+                # intact, and prohibit replacement until that owner has exited.
+                with self.stats_lock:
+                    self.stats["error"] = "Decoder consumer failed to stop within 2 seconds"
+                raise RuntimeError(self.stats["error"])
+            self.consumer_thread = None
             self.stop_player()
             with self.stats_lock:
                 self.stats["dropped_frames"] = dropped_base + queue.dropped
@@ -657,6 +666,12 @@ class Receiver:
             if self.session_thread.is_alive():
                 raise RuntimeError("Previous receiver session failed to stop within 3 seconds")
             self.session_thread = None
+        consumer = getattr(self, "consumer_thread", None)
+        if consumer is not None:
+            if consumer.is_alive():
+                raise RuntimeError("Previous decoder consumer still owns the player; replacement refused")
+            self.consumer_thread = None
+            self.stop_player()
 
     def replace_session(self, connection):
         # Only this accept thread owns session replacement. The old decoder is
