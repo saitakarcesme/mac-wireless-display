@@ -11,11 +11,27 @@ import install_receiver
 
 
 class ReceiverInstallationTests(unittest.TestCase):
+    def test_recovery_is_explicit_opt_in_and_default_template_unchanged(self):
+        template = 'ExecStart="%h/receiver" --port 16010\nRestart=on-failure\n'
+        self.assertEqual(install_receiver.service_configuration(template, False), template)
+        enabled = install_receiver.service_configuration(template, True)
+        self.assertIn(' --port 16010 --recovery-control\n', enabled)
+        self.assertEqual(enabled.count("--recovery-control"), 1)
+        for malformed in ("[Service]\n", "ExecStart=a\nExecStart=b\n"):
+            with self.assertRaises(ValueError):
+                install_receiver.service_configuration(malformed, True)
+
+    def test_unknown_argument_refuses_before_commands(self):
+        with patch.object(install_receiver.subprocess, "run") as run, \
+             contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            install_receiver.main(["--recovery-control=yes"])
+        run.assert_not_called()
+
     def test_missing_wayland_session_refuses_before_commands(self):
         with patch.object(install_receiver.sys, "platform", "linux"), \
              patch.dict(install_receiver.os.environ, {}, clear=True), \
              patch.object(install_receiver.subprocess, "run") as run, self.assertRaises(SystemExit):
-            install_receiver.main()
+            install_receiver.main([])
         run.assert_not_called()
 
     def test_active_service_refuses_before_writing(self):
@@ -27,8 +43,33 @@ class ReceiverInstallationTests(unittest.TestCase):
                  patch.object(install_receiver.Path, "home", return_value=home), \
                  patch.object(install_receiver.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
                  self.assertRaises(SystemExit):
-                install_receiver.main()
+                install_receiver.main([])
             self.assertFalse(home.exists())
+
+    def test_recovery_opt_in_installs_module_and_backs_up_previous_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            library = home / ".local/lib/mac-h264-display"
+            library.mkdir(parents=True)
+            previous = library / "recovery.py"
+            previous.write_text("# Previous installation\n")
+            def run(arguments, **kwargs):
+                return subprocess.CompletedProcess(arguments, 3 if "is-active" in arguments else 0)
+            with patch.object(install_receiver.sys, "platform", "linux"), \
+                 patch.dict(install_receiver.os.environ, {"WAYLAND_DISPLAY": "wayland-test"}, clear=True), \
+                 patch.object(install_receiver.shutil, "which", return_value="/mock/command"), \
+                 patch.object(install_receiver.Path, "home", return_value=home), \
+                 patch.object(install_receiver.subprocess, "run", side_effect=run) as commands, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                install_receiver.main(["--recovery-control"])
+            service = (home / ".config/systemd/user/mac-h264-display.service").read_text()
+            self.assertEqual(service.count("--recovery-control"), 1)
+            self.assertNotEqual(previous.read_text(), "# Previous installation\n")
+            backups = list((library / "backups").glob("*/recovery.py"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(), "# Previous installation\n")
+            calls = [entry.args[0] for entry in commands.call_args_list]
+            self.assertFalse(any("start" in call or "enable" in call for call in calls))
 
     def test_inactive_install_keeps_driver_and_only_imports_session_names(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -45,7 +86,7 @@ class ReceiverInstallationTests(unittest.TestCase):
                  patch.object(install_receiver.Path, "home", return_value=home), \
                  patch.object(install_receiver.subprocess, "run", side_effect=run) as commands, \
                  contextlib.redirect_stdout(io.StringIO()):
-                install_receiver.main()
+                install_receiver.main([])
             calls = [entry.args[0] for entry in commands.call_args_list]
             self.assertIn(["systemctl", "--user", "import-environment", "WAYLAND_DISPLAY", "DISPLAY"], calls)
             self.assertFalse(any("start" in call or "enable" in call for call in calls))
@@ -53,6 +94,8 @@ class ReceiverInstallationTests(unittest.TestCase):
             service = (home / ".config/systemd/user/mac-h264-display.service").read_text()
             self.assertIn("--refinement-port 16011", service)
             self.assertNotIn("Environment=", service)
+            self.assertNotIn("--recovery-control", service)
+            self.assertTrue((home / ".local/lib/mac-h264-display/recovery.py").is_file())
             self.assertTrue((home / ".local/lib/mac-h264-display/run-receiver").stat().st_mode & 0o100)
 
 

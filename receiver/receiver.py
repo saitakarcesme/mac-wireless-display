@@ -233,10 +233,12 @@ def mpv_arguments(ipc: Path, headless=False, renderer="gpu"):
 
 class FrameQueue:
     """Bound application backlog; never feed a P frame with missing references."""
-    def __init__(self, max_age: float):
+    def __init__(self, max_age: float, on_recovery=None):
         self.frames = collections.deque()
         self.condition = threading.Condition()
         self.max_age = max_age
+        self.on_recovery = on_recovery
+        self.recovery_signaled = False
         self.need_key = True
         self.closed = False
         self.dropped = 0
@@ -254,6 +256,9 @@ class FrameQueue:
         self.reset = True
         self.last_reset_reason = reason
         self.reset_reasons[reason] += 1
+        if self.on_recovery is not None:
+            self.on_recovery(reason)
+        self.recovery_signaled = True
 
     def warmup(self):
         with self.condition:
@@ -274,17 +279,25 @@ class FrameQueue:
                     sum(len(f.data) for f in self.frames) + len(frame.data) > self.max_bytes):
                 self._invalidate_locked("queue-capacity")
             if self.need_key and not frame.key:
+                if self.on_recovery is not None and not self.recovery_signaled:
+                    self.on_recovery("missing-initial-idr")
+                    self.recovery_signaled = True
                 self.dropped += 1
                 return
             if frame.key:
                 self.need_key = False
+                self.recovery_signaled = False
             self.frames.append(frame)
             self.condition.notify()
 
-    def get(self):
+    def get(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
         with self.condition:
             while not self.frames and not self.closed:
-                self.condition.wait(0.25)
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return None, False
+                self.condition.wait(remaining)
             reset = self.reset
             self.reset = False
             if self.frames:
@@ -327,6 +340,7 @@ class Receiver:
                       "dropped_frames": 0, "decoder_restarts": 0}
         self.stats_lock = threading.Lock()
         self.active_connection = None
+        self.recovery = None
         self.session_thread = None
         self.consumer_thread = None
         self.presentation = (PresentationTracker()
@@ -522,8 +536,9 @@ class Receiver:
         return result(None if not data else "receiver-stopping")
 
     def consume(self, queue, dropped_base):
+        recovery = getattr(queue, "recovery", None)
         while not self.stop.is_set():
-            frame, reset = queue.get()
+            frame, reset = queue.get(timeout=.250) if recovery is not None and recovery.enabled else queue.get()
             if reset:
                 # A dropped COMPLETE access unit needs a fresh reference chain,
                 # not a new player window. The next SPS/PPS+IDR safely replaces
@@ -533,6 +548,14 @@ class Receiver:
             if frame is None:
                 if queue.closed:
                     return
+                if (recovery is not None and recovery.negotiated and self.player is not None
+                        and self.player.poll() is not None):
+                    # A static desktop may never produce another capture callback.
+                    # Detect a dead decoder without waiting for another video AU.
+                    queue.invalidate("decoder-exited-idle")
+                    with self.stats_lock:
+                        self.stats["last_decoder_restart_reason"] = "decoder-exited-idle"
+                    self.stop_player()
                 continue
             if self.player is None:
                 if not frame.key:
@@ -573,6 +596,8 @@ class Receiver:
                 if result.decoder_broken:
                     self.stop_player()
                 continue
+            if recovery is not None and frame.key:
+                recovery.on_idr_written(frame.sequence)
             if getattr(self, "presentation", None):
                 self.presentation.record_write(frame)
             with self.stats_lock:
@@ -597,7 +622,11 @@ class Receiver:
     def session(self, connection):
         with self.refinement_lock:
             self.latest_video_sequence = None
-        queue = FrameQueue(self.args.max_queue_ms / 1000)
+        from recovery import RecoveryControl, receive_header, contains_idr
+        recovery = RecoveryControl(connection, getattr(self.args, "recovery_control", False))
+        self.recovery = recovery
+        queue = FrameQueue(self.args.max_queue_ms / 1000, recovery.request)
+        queue.recovery = recovery
         queue.warmup()
         with self.stats_lock:
             dropped_base = self.stats["dropped_frames"]
@@ -610,8 +639,11 @@ class Receiver:
             self.stats.update(connected=True, error=None)
         try:
             while not self.stop.is_set():
-                magic, version, flags, size, seq, captured, reserved = HEADER.unpack(
-                    self.receive_exact(connection, HEADER.size))
+                header = receive_header(connection, self.stop)
+                if header[:4] == b"HCTL":
+                    recovery.on_control(header)
+                    continue
+                magic, version, flags, size, seq, captured, reserved = HEADER.unpack(header)
                 if (magic != b"H264" or version not in (1, 2) or flags & ~1 or reserved
                         or not 0 < size <= MAX_PAYLOAD):
                     raise ValueError("Invalid H264 header")
@@ -625,6 +657,9 @@ class Receiver:
                 arrival = time.monotonic()
                 offset = arrival - captured / 1e9
                 minimum_offset = min(minimum_offset, offset) if minimum_offset is not None else offset
+                if recovery.negotiated and flags & 1 and not contains_idr(payload):
+                    raise ValueError("Negotiated keyframe lacks an Annex-B IDR NAL")
+                recovery.on_video(seq, bool(flags & 1))
                 if sequence is not None and seq != sequence + 1:
                     queue.invalidate()
                 sequence = seq
@@ -640,17 +675,20 @@ class Receiver:
                 self.stats.update(connected=False, error=str(exc) or "Sender disconnected")
         finally:
             queue.close(discard=True)
-            worker.join(timeout=2)
-            if worker.is_alive():
-                # The consumer still owns the shared player. Leave its handle
-                # intact, and prohibit replacement until that owner has exited.
+            try:
+                recovery.close()
+            finally:
+                worker.join(timeout=2)
+                if worker.is_alive():
+                    # The consumer still owns the shared player. Leave its handle
+                    # intact, and prohibit replacement until that owner has exited.
+                    with self.stats_lock:
+                        self.stats["error"] = "Decoder consumer failed to stop within 2 seconds"
+                    raise RuntimeError(self.stats["error"])
+                self.consumer_thread = None
+                self.stop_player()
                 with self.stats_lock:
-                    self.stats["error"] = "Decoder consumer failed to stop within 2 seconds"
-                raise RuntimeError(self.stats["error"])
-            self.consumer_thread = None
-            self.stop_player()
-            with self.stats_lock:
-                self.stats["dropped_frames"] = dropped_base + queue.dropped
+                    self.stats["dropped_frames"] = dropped_base + queue.dropped
 
     def retire_session(self):
         """Interrupt a stale SSH connection before accepting a new stream."""
@@ -726,6 +764,8 @@ class Receiver:
             previous_count, previous_time = count, now
             stats["updated_at"] = time.strftime("%FT%T%z")
             stats["mpv"] = self.mpv_stats()
+            if self.recovery is not None:
+                stats["recovery"] = self.recovery.snapshot()
             if self.presentation:
                 stats["presentation"] = self.presentation.snapshot()
             if self.refinement:
@@ -791,6 +831,8 @@ def main():
     parser.add_argument("--state-dir", default="~/.local/state/mac-h264-display")
     parser.add_argument("--max-queue-ms", type=float, default=100)
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--recovery-control", action="store_true",
+                        help="Negotiate optional bounded reverse IDR requests on the video connection")
     parser.add_argument("--measure-presentation", action="store_true",
                         help="Measure bounded arrival-to-mpv-output notifications; not display scanout")
     parser.add_argument("--refinement-port", type=int, default=0,

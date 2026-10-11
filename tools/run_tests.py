@@ -25,6 +25,7 @@ def main():
             ("launch-gate", ["menu/HostLaunchGate.swift", "menu/LaunchGateTests.swift"], []),
             ("latest-frame", ["host/LatestFrameGate.swift", "host/LatestFrameGateTests.swift"], []),
             ("keyframes", ["host/KeyframeCadence.swift", "host/KeyframeCadenceTests.swift"], []),
+            ("recovery-control", ["host/RecoveryControl.swift", "host/KeyframeCadence.swift", "host/RecoveryControlTests.swift"], []),
             ("pacer", ["host/LatestFrameGate.swift", "host/SubmissionPacer.swift", "host/SubmissionPacerTests.swift"], []),
             ("tiles", ["host/StaticRefinement.swift", "host/TileRefinement.swift", "host/TileRefinementTests.swift"],
              ["AppKit", "ScreenCaptureKit", "CoreGraphics", "CoreVideo"]),
@@ -37,6 +38,15 @@ def main():
                     command.extend(["-framework", framework])
                 run(command)
                 run([binary])
+            # Exercise the actual Swift transport and Python receiver with
+            # synthetic bytes on an ephemeral loopback port. No capture or decoder.
+            transport_probe = Path(temporary) / "recovery-transport"
+            run(["xcrun", "swiftc", "-parse-as-library",
+                 "host/RecoveryControl.swift", "host/RecoveryTransport.swift",
+                 "host/KeyframeCadence.swift", "tests/RecoveryTransportProbe.swift",
+                 "-o", transport_probe])
+            run([sys.executable, "tests/recovery_transport_integration.py", transport_probe,
+                 "--output", Path(temporary) / "recovery-transport-results.json"], env=environment)
     print("Offline tests passed. No apps were installed or launched.")
 
 

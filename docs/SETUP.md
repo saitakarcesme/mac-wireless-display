@@ -77,6 +77,27 @@ Use macOS **System Settings → Displays → Arrange** to position the virtual d
 
 The Linux monitor should show only the received Mac display. Fullscreen mpv hides its own controls, but notification banners, screen locking, compositor panels and laptop-lid behavior are properties of your Linux session. Review [Linux session integration](LINUX-SESSION.md) before leaving a laptop closed. They are not disabled globally by the installer.
 
+## Optional keyframe recovery
+
+Recovery control is off by default. To enable it, disconnect first, then run this from the repository in the Linux graphical session:
+
+```sh
+./receiver/install.sh --recovery-control
+```
+
+The installer backs up the current files and registers the receiver flag; it does not start the service. On the Mac, merge these fields into `~/.config/mac-wireless-display/h264-settings.json`, preserving the other settings:
+
+```json
+{
+  "recoveryControl": true,
+  "keyframeInterval": 30
+}
+```
+
+Reconnect from the menu and verify normal video and recovery from an idle source before experimenting with a longer keyframe interval. The host uses an interval above 30 only after the receiver accepts recovery control. The extension uses the existing SSH connection and requires no additional port, key or permission. See [keyframe recovery](recovery-control.md) for compatibility and validation limits, and the [wire protocol](../receiver/RECOVERY_PROTOCOL.md) for implementation details.
+
+To return to the default, disconnect, rerun `./receiver/install.sh` without the flag, set `recoveryControl` to `false` in the Mac settings, then reconnect. The host returns to the 30-frame fallback. Existing custom systemd drop-ins can override the installer’s service command; inspect them if the effective arguments differ from your selected mode.
+
 ## Connection and cleanup
 
 - **Disconnect** stops the app-owned stream and receiver, removes the virtual display, and preserves your Wi-Fi connection.

@@ -15,6 +15,7 @@ The prototype combines a native macOS virtual display, hardware H.264 encoding, 
 - Uses VideoToolbox on the Mac and VAAPI through mpv on Linux.
 - Replaces a settled image with its original lossless RGB snapshot for sharper text and color edges.
 - Bounds frame queues and resets damaged decoder streams instead of building an unlimited delay.
+- Optionally requests a fresh keyframe after decoder failure, including when the Mac desktop is idle.
 - Uses a monochrome menu-bar icon that follows macOS light/dark appearance.
 - Keeps video listeners on loopback and carries them through your authenticated SSH connection.
 
@@ -47,9 +48,9 @@ Read the [architecture](docs/ARCHITECTURE.md), [measurement notes](docs/PERFORMA
 
 ## What has actually been measured
 
-An isolated receiver path commonly presented an arriving frame in roughly **18 ms** on the tested hardware. That is one part of the pipeline, not a physical mouse-to-pixel measurement. Full-scroll stress tests also showed rare **600–800 ms** gaps; average FPS alone would hide them. A higher-precision sender timer improved sending from about 57 to 60 FPS, but did not improve actual presentation in the comparison, so it stays disabled.
+The latest recovery-aware comparison reduced median capture-callback-to-presentation time from about **34–39 ms to 28 ms** on the tested setup. The receiver-local median was about **15 ms**. These are software timestamps, not physical mouse-to-pixel latency. Occasional **600–800 ms** stress-test gaps remain; average FPS alone would hide them. A higher-precision sender timer improved sending from about 57 to 60 FPS without improving actual presentation, so it stays disabled.
 
-During matched motion tests, the host, encoder, and menu together used roughly **23–25% of one CPU core**. WindowServer was measured separately and cannot be attributed entirely to this application. Power consumption in watts was not measured. The [performance report](docs/PERFORMANCE.md) explains the test conditions and uncertainty.
+During matched motion tests, the host, encoder, and menu together used roughly **21% of one CPU core** in the recovery comparison (23–25% in the earlier timer trials). WindowServer was measured separately and cannot be attributed entirely to this application. Power consumption in watts was not measured. The [performance report](docs/PERFORMANCE.md) explains the test conditions and uncertainty.
 
 ## Development
 
@@ -62,7 +63,7 @@ The tests use generated media and fake protocol peers. They do not grant screen 
 
 ## Roadmap
 
-- Reduce stalls around large keyframes without weakening recovery.
+- Reduce remaining wireless stalls and validate negotiated recovery on more systems.
 - Validate quality and resource use on more Mac and Linux GPU combinations.
 - Simplify receiver setup and session integration.
 - Investigate multiple simultaneous remote displays; only one is supported by this prototype today.

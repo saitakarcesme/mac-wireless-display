@@ -44,7 +44,8 @@ private struct Options {
         return rate == 0 ? .zero : CMTime(value: 1, timescale: rate)
     }
     var bitrate: Int = 6_000_000
-    // Keep the proven fallback until reverse receiver recovery is implemented.
+    // Requested cadence; the effective value stays30 until recovery negotiation.
+    var recoveryControl = false
     var keyframeInterval = KeyframeCadence.defaultInterval
     // Explicitly opt in before testing native/120Hz capture. ExpectedFrameRate
     // is only an encoder hint; this policy actually bounds submissions.
@@ -80,6 +81,12 @@ private struct Options {
                     throw Failure("settings captureFPS must be an integer0...120 (0=native)")
                 }
                 options.captureFPS = number.int32Value
+            }
+            if let value = settings["recoveryControl"] {
+                guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+                    throw Failure("settings recoveryControl must be true or false")
+                }
+                options.recoveryControl = number.boolValue
             }
             if let value = settings["keyframeInterval"] {
                 do { options.keyframeInterval = try KeyframeCadence.validatedInterval(value) }
@@ -133,6 +140,9 @@ private struct Options {
             case "--bitrate":
                 guard let parsed = Int(value), (500_000...30_000_000).contains(parsed) else { throw Failure("bitrate must be 500000...30000000") }
                 options.bitrate = parsed
+            case "--recovery-control":
+                guard value == "true" || value == "false" else { throw Failure("recovery-control must be true or false") }
+                options.recoveryControl = value == "true"
             case "--keyframe-interval":
                 guard let parsed = Int(value), KeyframeCadence.allowedIntervals.contains(parsed) else {
                     throw Failure("keyframe interval must be30...600 submitted frames")
@@ -228,7 +238,9 @@ private final class FrameContext {
     let submittedNS = DispatchTime.now().uptimeNanoseconds
     let captureTimeNS: UInt64
     let tileVersions: [UInt64]?
-    init(_ raw: OwnedRawFrame) {
+    let recovery: RecoveryClaim?
+    init(_ raw: OwnedRawFrame, recovery: RecoveryClaim? = nil) {
+        self.recovery = recovery
         self.raw = raw; self.captureTimeNS = raw.captureTimeNS; self.tileVersions = raw.tileVersions
     }
 }
@@ -242,6 +254,8 @@ private struct Metrics {
     var pendingReplaced = 0, pendingDrained = 0, pendingWaitNS: UInt64 = 0
     var pendingMaxWaitNS: UInt64 = 0
     var drainWake = DrainWakeMetrics()
+    var recoveryRequests = 0, recoveryFrames = 0, recoverySnapshots = 0
+    var recoverySnapshotStale = 0, recoverySnapshotErrors = 0, recoverySnapshotTimeouts = 0
     var captureStatuses: [Int: Int] = [:]
     var displayTimeFrames = 0, callbackTimeFrames = 0
     var captureLagSumNS = 0.0, captureLagMaxNS = 0.0, captureLagMinNS = 0.0
@@ -338,77 +352,6 @@ private final class EncoderPixelPool {
     }
 }
 
-/// All socket access occurs on the output queue. The socket never leaves loopback.
-private final class BoundedTransport {
-    private var descriptor: Int32 = -1
-    private(set) var connectionGeneration: UInt64 = 0
-    private let port: UInt16
-    init(port: UInt16) { self.port = port }
-    deinit { disconnect() }
-    func disconnect() {
-        if descriptor >= 0 { Darwin.close(descriptor); descriptor = -1 }
-    }
-    private func connectIfNeeded() throws {
-        if descriptor >= 0 { return }
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw Failure("socket errno=\(errno)") }
-        descriptor = fd
-        var yes: Int32 = 1, buffer: Int32 = 65_536
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, socklen_t(MemoryLayout.size(ofValue: yes)))
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout.size(ofValue: yes)))
-        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buffer, socklen_t(MemoryLayout.size(ofValue: buffer)))
-        var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = port.bigEndian
-        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-        // A loopback connect is immediate or refused; no external network connect here.
-        let result = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard result == 0 else { let error = errno; disconnect(); throw Failure("connect errno=\(error)") }
-        let current = fcntl(fd, F_GETFL)
-        guard current >= 0, fcntl(fd, F_SETFL, current | O_NONBLOCK) == 0 else {
-            disconnect(); throw Failure("nonblocking socket configuration failed")
-        }
-        connectionGeneration &+= 1
-        log("transport connected target=127.0.0.1:\(port)")
-    }
-    func write(_ data: Data) throws -> (durationNS: UInt64, blocked: Bool) {
-        try connectIfNeeded()
-        let start = DispatchTime.now().uptimeNanoseconds
-        let deadline = start + 250_000_000
-        var blocked = false
-        do {
-            try data.withUnsafeBytes { buffer in
-                guard let base = buffer.baseAddress else { throw Failure("empty packet") }
-                var offset = 0
-                while offset < buffer.count {
-                    let now = DispatchTime.now().uptimeNanoseconds
-                    guard now < deadline else { throw Failure("write deadline 250ms") }
-                    let count = Darwin.send(descriptor, base.advanced(by: offset), buffer.count - offset, 0)
-                    if count > 0 { offset += count; continue }
-                    if count < 0 && errno == EINTR { continue }
-                    guard count < 0 && (errno == EWOULDBLOCK || errno == EAGAIN) else {
-                        throw Failure("send errno=\(errno)")
-                    }
-                    blocked = true
-                    var pollFD = pollfd(fd: descriptor, events: Int16(POLLOUT), revents: 0)
-                    let remaining = Int32(max(1, min(250, (deadline - now) / 1_000_000)))
-                    let result = poll(&pollFD, 1, remaining)
-                    if result < 0 && errno == EINTR { continue }
-                    guard result > 0, (pollFD.revents & Int16(POLLERR | POLLHUP | POLLNVAL)) == 0 else {
-                        throw Failure("write poll timeout or disconnect")
-                    }
-                }
-            }
-            return (DispatchTime.now().uptimeNanoseconds - start, blocked)
-        } catch { disconnect(); throw error }
-    }
-}
-
 private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private let options: Options
     private let captureQueue = DispatchQueue(label: "wireless-display.capture", qos: .userInteractive)
@@ -440,11 +383,18 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private var activity: NSObjectProtocol?
     private var clockDiagnostics = 0
     private var previousCompleteDisplayNS: UInt64?
+    private var recoveryGate = RecoveryRequestGate()
+    private var recoveryTimer: DispatchWorkItem?
+    private var recoveryWake = DrainWakeup()
+    private var recoveryScreenshotRetryAfterNS: UInt64 = 0
+    private var recoveryReconnectPending = false
+    private var recoveryFilter: SCContentFilter?
+    private var recoveryConfiguration: SCStreamConfiguration?
 
     init(options: Options) {
         self.options = options
-        transport = BoundedTransport(port: options.port)
-        keyframeCadence = KeyframeCadence(interval: options.keyframeInterval)
+        transport = BoundedTransport(port: options.port, queue: outputQueue, recoveryEnabled: options.recoveryControl, report: log)
+        keyframeCadence = KeyframeCadence()
         submissionPacer = SubmissionPacer(enabled: options.capEncoderFPS, fps: options.fps)
     }
 
@@ -457,7 +407,10 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
             throw Failure("display must be 1920x1080, actual=\(display.width)x\(display.height)")
         }
         try makeEncoder()
-        pixelPool = options.copyFrames ? try EncoderPixelPool() : nil
+        pixelPool = options.copyFrames || options.recoveryControl ? try EncoderPixelPool() : nil
+        transport.onRecovery = { [weak self] event in
+            self?.captureQueue.async { [weak self] in self?.handleRecovery(event) }
+        }
         activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
                                                         reason: "Low latency wireless display capture")
         let stream = try makeStream(display: display)
@@ -489,6 +442,8 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
         configuration.captureDynamicRange = .SDR
         let filter = SCContentFilter(display: display, excludingWindows: [])
+        recoveryFilter = filter
+        recoveryConfiguration = configuration
         let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
         return stream
@@ -559,7 +514,7 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
         guard hardwareConfirmed else {
             throw Failure("hardware encoding could not be confirmed status=\(query)")
         }
-        log("encoder ready codec=H264 hardware=true encoderID=\(encoderID) hardwarePropertyStatus=\(query) profile=HighAuto lowLatency=true frameReordering=false keyframeInterval=\(options.keyframeInterval) receiverRecoveryControl=false")
+        log("encoder ready codec=H264 hardware=true encoderID=\(encoderID) hardwarePropertyStatus=\(query) profile=HighAuto lowLatency=true frameReordering=false requestedKeyframeInterval=\(options.keyframeInterval) effectiveKeyframeInterval=30 receiverRecoveryControl=\(options.recoveryControl)")
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -579,6 +534,7 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
         guard sampleBuffer.isValid,
               SCFrameStatus(rawValue: rawStatus) == .complete,
               let capturedImage = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        recoveryGate.capturedLiveFrame()
         let now = callbackNS
         let displayObservation = CaptureClock.observe(attachments?.first?[.displayTime], callbackNS: callbackNS)
         if clockDiagnostics < 6 {
@@ -627,6 +583,106 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    private func handleRecovery(_ event: RecoveryTransportEvent) {
+        dispatchPrecondition(condition: .onQueue(captureQueue))
+        guard !captureStopped else { return }
+        switch event {
+        case .active(let epoch):
+            recoveryGate.activate(epoch: epoch)
+            stateLock.withLock { keyframeCadence.setInterval(options.keyframeInterval) }
+            log("recovery ready effectiveKeyframeInterval=\(options.keyframeInterval)")
+        case .inactive(let reconnect):
+            recoveryGate.activate(epoch: nil)
+            cancelRecoveryWake()
+            recoveryReconnectPending = reconnect
+            stateLock.withLock {
+                keyframeCadence.setInterval(KeyframeCadence.defaultInterval)
+                needsKeyFrame = true
+                if reconnect { reconnectAfterNS = max(reconnectAfterNS, DispatchTime.now().uptimeNanoseconds + 100_000_000) }
+            }
+            if reconnect { serviceRecovery() }
+        case .request(let claim):
+            guard recoveryGate.request(claim) else { return }
+            stateLock.withLock { metrics.recoveryRequests += 1 }
+            serviceRecovery()
+        }
+    }
+
+    private func cancelRecoveryWake() {
+        recoveryTimer?.cancel(); recoveryTimer = nil; recoveryWake.cancel()
+    }
+    private func scheduleRecovery(at deadline: UInt64) {
+        guard let token = recoveryWake.schedule(at: deadline) else { return }
+        recoveryTimer?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.recoveryWake.consume(token), !self.captureStopped else { return }
+            self.recoveryTimer = nil
+            self.serviceRecovery()
+        }
+        recoveryTimer = item
+        captureQueue.asyncAfter(deadline: DispatchTime(uptimeNanoseconds: deadline), execute: item)
+    }
+
+    private func serviceRecovery() {
+        dispatchPrecondition(condition: .onQueue(captureQueue))
+        guard !captureStopped, options.recoveryControl, recoveryGate.pendingID != nil || recoveryReconnectPending else {
+            cancelRecoveryWake(); return
+        }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let eligible = max(recoveryGate.nextAllowedNS, recoveryScreenshotRetryAfterNS,
+                           stateLock.withLock { reconnectAfterNS })
+        if now < eligible { scheduleRecovery(at: eligible); return }
+        cancelRecoveryWake()
+        if gate.hasPending { drainPendingFrame(); return }
+        if gate.inFlight { return } // Completion calls this again without polling.
+        guard let filter = recoveryFilter, let configuration = recoveryConfiguration,
+              let token = recoveryGate.beginSnapshot(at: now, allowWithoutRequest: recoveryReconnectPending) else { return }
+        stateLock.withLock { metrics.recoverySnapshots += 1 }
+        captureQueue.asyncAfter(deadline: DispatchTime(uptimeNanoseconds: token.deadlineNS)) { [weak self] in
+            guard let self, self.recoveryGate.snapshot == token else { return }
+            self.recoveryGate.timeoutSnapshot(token)
+            self.stateLock.withLock { self.metrics.recoverySnapshotTimeouts += 1 }
+            self.logRecoverySnapshotFailure("snapshot timeout; outstanding API call remains single-flight")
+        }
+        // Uses the exact already-authorized display filter, dimensions, cursor
+        // and sRGB/NV12 configuration. No alternate display or permission API.
+        SCScreenshotManager.captureSampleBuffer(contentFilter: filter, configuration: configuration) { [weak self] sample, error in
+            self?.captureQueue.async { [weak self] in
+                guard let self else { return }
+                let now = DispatchTime.now().uptimeNanoseconds
+                guard self.recoveryGate.finishSnapshot(token, at: now, allowWithoutRequest: self.recoveryReconnectPending), !self.captureStopped else {
+                    self.stateLock.withLock { self.metrics.recoverySnapshotStale += 1 }
+                    self.serviceRecovery()
+                    return
+                }
+                do {
+                    guard error == nil, let sample, sample.isValid,
+                          let captured = CMSampleBufferGetImageBuffer(sample), let pool = self.pixelPool else {
+                        throw Failure("recovery screenshot failed: \(String(describing: error))")
+                    }
+                    let image = try pool.copy(captured)
+                    self.refinement?.frameCaptured()
+                    let versions = self.tileRefinement?.frameCaptured(nil)
+                    var pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                    if !pts.isValid { pts = CMTime(value: Int64(now), timescale: 1_000_000_000) }
+                    let raw = OwnedRawFrame(image: image, presentationTime: pts, captureTimeNS: now, tileVersions: versions)
+                    let replaced = self.gate.offer(raw, at: now, blockedUntil: self.submissionPacer.earliestSubmission(retryAfter: self.stateLock.withLock { self.reconnectAfterNS }))
+                    precondition(!replaced, "a validated idle screenshot cannot replace a newer raw frame")
+                    self.drainPendingFrame()
+                } catch {
+                    self.stateLock.withLock { self.metrics.recoverySnapshotErrors += 1 }
+                    self.logRecoverySnapshotFailure(String(describing: error))
+                    self.serviceRecovery()
+                }
+            }
+        }
+    }
+
+    private func logRecoverySnapshotFailure(_ reason: String) {
+        recoveryScreenshotRetryAfterNS = DispatchTime.now().uptimeNanoseconds + 1_000_000_000
+        log("recovery idle screenshot: \(reason)")
+    }
+
     private func drainPendingFrame() {
         dispatchPrecondition(condition: .onQueue(captureQueue))
         guard !captureStopped, gate.hasPending, !gate.inFlight, let session else {
@@ -642,6 +698,7 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         cancelScheduledDrain()
         guard let pending = gate.takeIfReady(at: now, blockedUntil: earliest) else { return }
+        let recovery = recoveryGate.claim(at: now)
         let forceKey = stateLock.withLock { () -> Bool in
             if pending.wasDeferred {
                 let wait = now - pending.offeredAtNS
@@ -649,11 +706,12 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
                 metrics.pendingWaitNS += wait
                 metrics.pendingMaxWaitNS = max(metrics.pendingMaxWaitNS, wait)
             }
-            let force = keyframeCadence.nextSubmission(forceRecovery: needsKeyFrame)
+            if recovery != nil { metrics.recoveryFrames += 1 }
+            let force = keyframeCadence.nextSubmission(forceRecovery: needsKeyFrame || recovery != nil)
             if force { needsKeyFrame = false }
             return force
         }
-        let context = Unmanaged.passRetained(FrameContext(pending.frame)).toOpaque()
+        let context = Unmanaged.passRetained(FrameContext(pending.frame, recovery: recovery)).toOpaque()
         let properties = forceKey ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
         var flags = VTEncodeInfoFlags()
         // Retrying the final raw state after transport failure must not resubmit
@@ -730,12 +788,14 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
             // the current frame; a late canceled callback cannot drain twice.
             cancelScheduledDrain()
             guard !captureStopped else { return }
+            if retry == nil { recoveryReconnectPending = false }
             gate.complete()
             if let retry, !gate.hasPending {
                 gate.offer(retry, at: retry.captureTimeNS,
                            blockedUntil: submissionPacer.earliestSubmission(retryAfter: stateLock.withLock { reconnectAfterNS }))
             }
             drainPendingFrame()
+            serviceRecovery()
         }
     }
 
@@ -768,7 +828,7 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
                 packet.append(payload)
                 do {
-                    let result = try transport.write(packet)
+                    let result = try transport.write(packet, sequence: sequence, keyframe: keyframe, recovery: frame.recovery)
                     refinement?.frameSent(sequence: sequence)
                     if let versions = frame.tileVersions {
                         tileRefinement?.frameSent(versions: versions, sequence: sequence,
@@ -900,7 +960,10 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
             + String(format: " drain_wake_count=%d drain_wake_delta_mean_ms=%.3f drain_wake_delta_p50_ms=%.3f drain_wake_late_max_ms=%.3f drain_wake_early_count=%d drain_wake_sample_count=%d",
                 values.drainWake.count, values.drainWake.meanDeltaNS / 1e6,
                 values.drainWake.sampledMedianDeltaNS / 1e6, Double(values.drainWake.maximumLateNS) / 1e6,
-                values.drainWake.earlyCount, values.drainWake.samplesNS.count))
+                values.drainWake.earlyCount, values.drainWake.samplesNS.count)
+            + String(format: " recovery_requests=%d recovery_idr_submissions=%d recovery_snapshots=%d recovery_snapshot_stale=%d recovery_snapshot_errors=%d recovery_snapshot_timeouts=%d",
+                values.recoveryRequests, values.recoveryFrames, values.recoverySnapshots,
+                values.recoverySnapshotStale, values.recoverySnapshotErrors, values.recoverySnapshotTimeouts))
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -909,6 +972,8 @@ private final class DisplayHost: NSObject, SCStreamOutput, SCStreamDelegate {
             captureStopped = true
             cancelScheduledDrain()
             timer?.cancel()
+            recoveryTimer?.cancel()
+            recoveryGate.activate(epoch: nil)
             log("capture stopped error=\(error)")
             Darwin.exit(3)
         }
@@ -929,7 +994,7 @@ private enum Main {
             }
             withExtendedLifetime(host) { app.run() }
         } catch {
-            log("\(error)\nUsage: WirelessDisplayHost --display-id ID [--port 16010] [--fps 60] [--capture-fps 60|0|120] [--bitrate 6000000] [--keyframe-interval 30] [--cap-encoder-fps false] [--strict-pacer-timer false]")
+            log("\(error)\nUsage: WirelessDisplayHost --display-id ID [--port 16010] [--fps 60] [--capture-fps 60|0|120] [--bitrate 6000000] [--keyframe-interval 30] [--cap-encoder-fps false] [--strict-pacer-timer false] [--recovery-control false]")
             Darwin.exit(1)
         }
     }

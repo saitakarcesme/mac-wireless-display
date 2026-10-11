@@ -21,7 +21,7 @@ struct KeyframeCadence {
         return number.intValue
     }
 
-    let interval: Int
+    private(set) var interval: Int
     private var submittedSinceRequest: Int
 
     init(interval: Int = defaultInterval) {
@@ -34,5 +34,10 @@ struct KeyframeCadence {
         let force = forceRecovery || submittedSinceRequest >= interval
         submittedSinceRequest = force ? 1 : submittedSinceRequest + 1
         return force
+    }
+
+    mutating func setInterval(_ interval: Int) {
+        precondition(Self.allowedIntervals.contains(interval))
+        self.interval = interval
     }
 }

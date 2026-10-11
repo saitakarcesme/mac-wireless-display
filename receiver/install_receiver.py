@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Register an inactive user service using the current Python and Wayland session."""
+import argparse
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -9,7 +10,21 @@ import subprocess
 import sys
 
 
-def main():
+def service_configuration(template: str, recovery_control: bool) -> str:
+    """Enable recovery only by explicit installer opt-in."""
+    commands = [line for line in template.splitlines() if line.startswith("ExecStart=")]
+    if len(commands) != 1:
+        raise ValueError("Service template must have exactly one ExecStart command")
+    if recovery_control:
+        return template.replace(commands[0], commands[0] + " --recovery-control", 1)
+    return template
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--recovery-control", action="store_true",
+                        help="Enable optional negotiated keyframe recovery (host support required)")
+    options = parser.parse_args(argv)
     if sys.version_info < (3, 10):
         raise SystemExit("Python 3.10 or newer is required")
     if sys.platform != "linux":
@@ -31,6 +46,7 @@ def main():
     state = home / ".local/state/mac-h264-display"
     units = home / ".config/systemd/user"
     sources = {library / "receiver.py": source / "receiver.py",
+               library / "recovery.py": source / "recovery.py",
                library / "refinement.py": source.parent / "refinement/refinement.py",
                units / service: source / service}
     for target, origin in sources.items():
@@ -38,6 +54,7 @@ def main():
             raise SystemExit("Missing source: " + str(origin))
         if target.is_symlink():
             raise SystemExit("Refusing to replace a symbolic link: " + str(target))
+    service_text = service_configuration((source / service).read_text(), options.recovery_control)
     for directory in (library, state, units):
         if directory.is_symlink():
             raise SystemExit("Refusing a symbolic-link installation directory: " + str(directory))
@@ -52,7 +69,10 @@ def main():
         if path.exists():
             shutil.copy2(path, backup / path.name)
     for target, origin in sources.items():
-        shutil.copy2(origin, target)
+        if target == units / service:
+            target.write_text(service_text)
+        else:
+            shutil.copy2(origin, target)
         target.chmod(0o600 if target.suffix == ".service" else 0o700)
     python = str(Path(sys.executable).resolve())
     launcher.write_text("#!/bin/sh\nexec " + shlex.quote(python) + " "

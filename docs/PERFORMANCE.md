@@ -18,6 +18,51 @@ The public package generalizes the local prototype's app names, configuration an
 
 Increasing virtual-display timing from 60 to 120 Hz restored source cadence from approximately 30 to 58 FPS on this system, while preserving a 60 FPS encoder target. Native receiver output, one-frame swapchain depth, VAAPI decoding and default compositor pacing reduced the receiver-local median to roughly 14–18 ms in measured cohorts. Settled RGB restoration and the normal connect/disconnect lifecycle were verified separately.
 
+## Negotiated recovery and longer keyframe interval
+
+A later same-binary A/B/A comparison kept the hardware encoder, 18 Mbit/s target, capture timing, lossless settled-image path and recovery protocol fixed. It changed only the requested keyframe interval: 30, 120, then 30 frames. Each stimulus was the same generated 45-second scrolling scene. Presentation statistics below cover the **whole 45 seconds**, including recovery; they must not be directly ranked against the shorter interior windows in the timer experiment below.
+
+| Metric | 30 frames A | 120 frames | 30 frames B |
+| --- | ---: | ---: | ---: |
+| Actual presented FPS | 55.841 | 55.241 | 55.024 |
+| Callback → presentation median | 38.796 ms | 27.974 ms | 33.866 ms |
+| Callback → presentation p95 | 111.608 ms | 75.495 ms | 115.428 ms |
+| Arrival → presentation median | 18.266 ms | 14.994 ms | 17.751 ms |
+| Arrival → presentation p95 | 52.895 ms | 37.451 ms | 52.506 ms |
+| Presentation gaps over 100 ms | 25 | 11 | 30 |
+| Maximum presentation gap | 560.000 ms | 719.211 ms | 477.238 ms |
+| Delivered video bitrate | 13.078 Mbit/s | 4.696 Mbit/s | 10.834 Mbit/s |
+| Delivered IDR frames | 85 | 22 | 84 |
+| Host + encoder + menu CPU | 21.109% | 20.988% | 21.445% |
+
+The longer interval reduced typical software latency and the frequency of long gaps in this comparison, without improving delivered FPS. It also had the worst individual gap, during early recovery. A single A/B/A on variable Wi-Fi does **not** prove universal latency or reliability improvement. The stream's target bitrate is not a fixed wire rate: content and encoder rate control affect actual output.
+
+CPU uses matched 31-sample motion windows and is a percentage of one core. The approximately 1% relative difference is too small to claim an efficiency gain. Shared WindowServer CPU was 50.741%, 51.338% and 46.927% of one core, separately. Estimated clock-alignment uncertainty was ±1.573, ±2.031 and ±2.112 ms, assuming a symmetric path.
+
+The tested local profile retains the 120-frame interval with negotiated recovery. The public host defaults to a conservative 30-frame interval and recovery disabled; opt-in instructions are in [recovery control](recovery-control.md). If the peer does not negotiate, the host keeps the short interval.
+
+### Recovery while the source is idle
+
+A controlled fault stopped only the receiver's owned decoder process while the source was settled. The receiver requested a fresh IDR over the existing authenticated connection. A replacement decoder was observed about 588 ms after the fault; safe lossless RGB returned after about 2.68 seconds, including snapshot transfer. One recovery request and one replacement were recorded, without reconnecting the video TCP stream.
+
+The screenshot request woke a newer ordinary capture callback, which correctly superseded the requested screenshot. This verifies idle recovery and stale-snapshot rejection in that case; it does not validate every screenshot fallback branch or guarantee recovery time on another system.
+
+### Generated temporal quality check
+
+A separate 360-frame sequence of moving text, colors and fine strokes compared intervals 30 and 120. Both used matching native 1080p NV12 reference frames, 18 Mbit/s hardware encoding and the same color metadata. Every frame decoded. Actual IDRs were at 0, 30, …, 330 versus 0, 120 and 240.
+
+| Metric | Interval 30 | Interval 120 |
+| --- | ---: | ---: |
+| Median Y / U / V PSNR | 52.802 / 56.314 / 55.686 dB | 53.295 / 56.444 / 55.730 dB |
+| Median edge Y / U / V absolute error | 0.758 / 0.690 / 0.741 | 0.701 / 0.668 / 0.719 |
+| Actual encoded bitrate | 7.824 Mbit/s | 2.641 Mbit/s |
+
+Edge errors are 8-bit code values. The worst paired edge-error increases were 0.036 / 0.022 / 0.022. This fixture found no material quality regression, but it is not a universal perceptual-quality result. Comparing against NV12 isolates encoding error; it does not measure the earlier loss of chroma detail when RGB becomes 4:2:0, physical panel colors, Wi-Fi delivery or Mac power consumption.
+
+## Unadopted decoder-write allowance
+
+A separate 0 / 10 / 0 ms completion-floor comparison tested whether a nearly complete frame could safely finish rather than reset its decoder. All three 45-second trials had zero dropped frames and no decoder replacements. The 10 ms allowance was **never exercised**, so apparent differences between those runs cannot be attributed to it. The exact pre-experiment receiver was restored, and the allowance is not included in this release.
+
 ## Rejected timer experiment
 
 A same-binary OFF/ON/OFF comparison changed only the high-precision submission timer. Each full-scroll stimulus lasted 45 seconds; presentation results used matched 39-second interior windows and included decoder recovery.
@@ -43,10 +88,10 @@ The precise timer improved sender cadence by 4.38%, but actual presentation did 
 - **Arrival → presentation:** the Linux receiver's packet arrival to compositor presentation feedback.
 - **Physical input-to-photon:** not measured. It also includes input processing, the source application's timing, scanout position and panel response.
 
-Clock alignment uses repeated monotonic midpoint probes. Estimated clock uncertainty for the three cohorts was ±1.71, ±2.14 and ±1.83 ms, under a symmetric-path assumption. Capture modes can change when the callback arrives relative to the scheduled display time, so results from different timestamp boundaries must not be compared as physical latency improvements.
+Clock alignment uses repeated monotonic midpoint probes. Estimated clock uncertainty for the timer cohorts was ±1.71, ±2.14 and ±1.83 ms, under a symmetric-path assumption. Capture modes can change when the callback arrives relative to the scheduled display time, so results from different timestamp boundaries must not be compared as physical latency improvements.
 
 ## Remaining issues
 
-Occasional large keyframes and upstream delivery pauses still produce visible tail latency. One 292 KB IDR began its decoder write with roughly 61 ms of its receiver budget remaining and still timed out after a partial write. A small five-millisecond completion allowance cannot fix that event. Longer keyframe intervals require a proven immediate recovery protocol before they are safe to enable.
+Occasional large keyframes and upstream delivery pauses still produce visible tail latency. One 292 KB IDR began its decoder write with roughly 61 ms of its receiver budget remaining and still timed out after a partial write. A small five-millisecond completion allowance cannot fix that event. Negotiated recovery now permits a longer interval in the tested local profile, but it does not shrink each large IDR or eliminate network pauses. The public default remains conservative.
 
 The tested system can feel responsive during ordinary use while failing a full-scroll stress target. Both observations matter. Do not infer zero latency, cable equivalence or near-zero total Mac load from average FPS or a short successful demo.
