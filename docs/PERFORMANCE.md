@@ -104,6 +104,33 @@ A subsequent 600-second ordinary-connection check used 21 process snapshots and 
 
 Host + encoder + menu averaged 0.792% of one CPU core. This subtotal excludes the Python connection helper and SSH tunnel. Shared WindowServer averaged 30.740% separately. The three sampled processes retained stable PIDs; their resident-memory endpoint changes were −3.000, +0.609 and −0.031 MiB respectively. This short observation found no sustained growth in those endpoints, but it is not a proof against all memory leaks or a measurement of total graphics memory, watts or battery life.
 
+### Follow-up including the connection helper and tunnel
+
+A separate 600.017-second ordinary-connection observation expanded the scope to all five persistent Mac processes. It used 21 snapshots, 20 complete intervals and six receiver-status samples; all measured PIDs remained stable and unique.
+
+| Persistent process | CPU, percent of one core |
+| --- | ---: |
+| Capture host | 0.4300% |
+| Hardware encoder process | 0.0233% |
+| Menu app | 0.1267% |
+| Python connection helper | 0.2200% |
+| SSH tunnel | 0.1417% |
+| Combined, before rounding | 0.9416% |
+
+All six status samples were connected with a safe visible RGB snapshot matching the latest video sequence. Received and written frames advanced together by 23; drops stayed at zero and the single initial decoder remained running. This was mostly settled content, not a frame-free benchmark. Process resident-memory endpoint changes were −5.000, −1.953, −3.078, +2.734 and +0.359 MiB in the table's order; sparse endpoints do not establish leak freedom.
+
+Shared WindowServer averaged 40.5455% of one core, separately. The five-process subtotal includes those processes' user and system CPU counters, but excludes short-lived child processes and unattributed kernel/driver work. It is neither whole-Mac CPU nor a watts, battery-life or total graphics-memory measurement. Lightweight sampling and bounded status reads remained present.
+
+## Unadopted source-age screening
+
+A private receiver experiment screened complete frames for excess source-to-arrival delay relative to a bounded recent baseline. Relative timing cannot establish absolute frame age, and its clock assumptions were explicit. An OFF / ON / OFF comparison injected one 400 ms payload-read pause into each identical 45-second scrolling scene. All injected pauses and presentation mappings were validated; unfavorable events outside the injection were retained.
+
+The first relatively fresh presentation after the reader resumed arrived after approximately 412 / 143 / 441 ms. Here, "relatively fresh" means callback-to-presentation age no more than the preceding five-second median plus 100 ms; it is a diagnostic catch-up threshold, not a physical latency target. However, the presentation gap spanning that resume remained approximately 430 / 430 / 400 ms: screening did not eliminate the injected freeze. Whole-run presented FPS was 56.85 / 54.25 / 55.66, with maximum gaps of 560 / 1,480 / 699 ms. The enabled run rejected stale recovery IDRs and encountered the existing one-second retry interval, contributing to a separate longer freeze. Estimated clock-alignment uncertainty was ±2.806 / 3.212 / 2.074 ms under a symmetric-path assumption. The feature was not adopted.
+
+A follow-up private change allowed an unusable response to accelerate a retry only after a validated acknowledgment matched the latest request in the same pending recovery episode. The existing 250 ms minimum request interval, reference-chain barrier and complete-frame ownership were preserved. Focused real-socket tests covered delayed acknowledgments, episode changes, throttling and send-completion races. In the follow-up live enabled run, no recovery IDR was rejected and the acceleration counter remained zero. The new path was therefore **unexercised live**, and differences in that run cannot demonstrate its benefit.
+
+The follow-up OFF / ON / OFF runs presented 57.44 / 55.30 / 56.33 FPS, with maximum gaps of 420 / 830 / 510 ms. The same catch-up measure was approximately 439 / 1,133 / 395 ms; screening was worse in this event. Estimated clock uncertainty was ±2.378 / 2.475 / 2.341 ms. Matched five-process CPU was 20.303 / 22.031 / 21.763% of one core, with shared WindowServer at 50.788 / 52.406 / 53.157% separately. No efficiency gain was established. Neither experimental feature is installed in the retained normal profile or included in this public release. All temporary instrumentation was removed, the ordinary receiver was reconnected, and safe settled RGB was verified afterward.
+
 ## Remaining issues
 
 ### Optional encoder rate-window requests

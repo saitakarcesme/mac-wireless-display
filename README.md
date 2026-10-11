@@ -52,6 +52,8 @@ The latest recovery-aware comparison reduced median capture-callback-to-presenta
 
 During matched motion tests, the host, encoder, and menu together used roughly **21% of one CPU core** in the recovery comparison (23–25% in the earlier timer trials). That subtotal excludes the Python connection helper and SSH tunnel. WindowServer was measured separately and cannot be attributed entirely to this application. Power consumption in watts was not measured. The [performance report](docs/PERFORMANCE.md) explains the test conditions and uncertainty.
 
+A later ten-minute mostly settled check included all five persistent connection processes and averaged **0.94% of one core**, with no dropped frames or decoder restarts. This excludes short-lived children and shared WindowServer work; it is not total Mac load or an energy measurement.
+
 ## Development
 
 ```sh
