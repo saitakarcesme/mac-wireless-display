@@ -38,3 +38,32 @@ With local LaunchAgent crash supervision enabled, killing the exact installed me
 ## Unresolved receiver availability issue
 
 A later unattended idle check did **not** pass: the receiver became unreachable through all available management paths, and its direct Wi-Fi access point disappeared. A bounded network wake attempt did not restore access. The cause has not been established; local inspection is required. The application remains configured to retry when the receiver becomes reachable again. The process-fault tests above must not be interpreted as proof of overnight availability or a fix for this machine-level outage.
+
+### Congestion investigation (October 12)
+
+A receiver can remain connected while its display stutters. Check competing traffic
+as well as average frame rate. In one attended direct-Wi-Fi session, the source still
+produced approximately 57 FPS, but RTT spikes reached 156–259 ms and cloud downloads
+transferred 48–58 MB per 30-second observation. These observations identify congestion
+as a candidate, not proof that every stall has the same cause.
+
+An AF41 traffic-class experiment initially reduced receiver arrival-to-mpv-notification
+p95/p99 from 32.66/63.35 ms in a control run to 14.35/30.06 ms. A repeat nevertheless
+suffered decoder recovery and over 200 dropped frames. **The change was rolled back**;
+the shipped tunnel still uses the system traffic-class default. These are software
+notification timings, not physical input-to-photon measurements. Background traffic
+was uncontrolled, so the comparison cannot establish a reliable QoS benefit.
+
+For this display-only network, macOS **Low Data Mode** was then enabled in Wi-Fi →
+Details. A subsequent 30-second observation no longer showed the large cloud-download
+burst. The unchanged default-QoS stream completed the scrolling fixture with 1,755
+frames received and written, zero drops, no decoder restart after initial launch,
+and approximately 57 FPS during motion. Receiver notification p95/p99 was
+29.33/53.80 ms. This supports keeping the network-specific setting for this installation,
+but is not a controlled proof of cable-equivalent smoothness or overnight reliability.
+
+[Apple documents Low Data Mode as a per-network data-use setting](https://support.apple.com/guide/mac-help/wi-fi-settings-on-mac-mh11935/mac).
+It may defer background synchronization while connected to that network. It does not
+change this project's encoder resolution, bitrate, or color settings. Other Wi-Fi
+networks retain their existing settings; turn it off in that network's Details pane
+to restore the previous behavior.
